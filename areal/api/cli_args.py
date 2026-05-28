@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import warnings
 from dataclasses import MISSING as dataclass_missing
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
@@ -2914,6 +2915,12 @@ class TeacherConfig:
     )
 
     def __post_init__(self):
+        if self.rollout is not None and self.train is not None:
+            warnings.warn(
+                "Both teacher.rollout and teacher.train are configured; "
+                f"teacher.engine_type={self.engine_type!r} selects which one is used.",
+                stacklevel=2,
+            )
         if self.engine_type == "rollout" and self.rollout is None:
             raise ValueError(
                 "teacher.rollout must be provided when teacher.engine_type='rollout'."
