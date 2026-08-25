@@ -496,6 +496,11 @@ class MegatronEngine(TrainEngine):
             if len(self.model) == 1:
                 model_config.param_sync_func = model_config.param_sync_func[0]
         model_config.finalize_model_grads_func = finalize_model_grads
+        if getattr(self.config, "sao_freeze_attention", False):
+            from areal.utils.functional import freeze_attention_parameters
+
+            frozen = freeze_attention_parameters(self.model)
+            self.logger.info(f"SAO froze {frozen:,} critic attention parameters")
         self._create_optimizer(ft_spec)
         self._initialized = True
 

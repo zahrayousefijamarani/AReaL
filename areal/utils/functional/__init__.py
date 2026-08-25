@@ -6,10 +6,12 @@ from areal.utils.functional.functional import (
     cispo_loss_fn,
     dpo_pair_logratios,
     dpo_preference_loss,
+    freeze_attention_parameters,
     masked_normalization,
     ppo_actor_loss_fn,
     ppo_critic_loss_fn,
     reward_overlong_penalty,
+    sao_loss_fn,
     sapo_loss_fn,
 )
 from areal.utils.functional.vocab_parallel import (
@@ -24,11 +26,13 @@ __all__ = [
     "cispo_loss_fn",
     "dpo_pair_logratios",
     "dpo_preference_loss",
+    "freeze_attention_parameters",
     "masked_normalization",
     "ppo_actor_loss_fn",
     "ppo_critic_loss_fn",
     "reward_overlong_penalty",
     "sapo_loss_fn",
+    "sao_loss_fn",
     # vocab_parallel.py
     "gather_logprobs",
     "gather_logprobs_entropy",

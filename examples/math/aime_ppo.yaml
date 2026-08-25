@@ -1,9 +1,9 @@
-experiment_name: gsm8k-ppo
+experiment_name: aime25-ppo
 trial_name: trial0
 
 seed: 1
 enable_offload: false
-total_train_epochs: 10
+total_train_epochs: 300
 tokenizer_path: ${actor.path}
 
 cluster:
@@ -48,7 +48,7 @@ actor:
   backend: "fsdp:d1p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: /home/zahra/models/Qwen3-0.6B
+  path: /home/nfs/models/Qwen3-0.6B
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -145,19 +145,19 @@ vllm:
 
 # datasets
 train_dataset:
-  batch_size: 256
+  batch_size: 30
   shuffle: true
   pin_memory: true
   num_workers: 4
-  path: /home/zahra/datasets/gsm8k
+  path: /home/zahra/datasets/aime
   type: rl
   max_length: 1024
 
 valid_dataset:
-  batch_size: 256
+  batch_size: 15
   pin_memory: true
   num_workers: 4
-  path: /home/zahra/datasets/gsm8k
+  path: /home/zahra/datasets/aime
   type: rl
 
 # Utilities
@@ -194,7 +194,7 @@ stats_logger:
     mode: disabled
   swanlab:
     project: ppo
-    name: gsm8k
+    name: aime25
     mode: cloud
     api_key: CHqueBePouUJGo8kgtGXR
 

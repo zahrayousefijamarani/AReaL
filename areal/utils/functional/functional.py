@@ -661,6 +661,77 @@ def sapo_loss_fn(
 
     return pg_loss, stat
 
+def sao_loss_fn(
+    logprobs: torch.Tensor,
+    rollout_logprobs: torch.Tensor,
+    advantages: torch.Tensor,
+    eps_clip_low: float,
+    eps_clip_high: float,
+    loss_mask: torch.Tensor,
+) -> tuple[torch.Tensor, dict]:
+    """Compute SAO's direct-importance-sampling policy loss.
+
+    SAO trains on single, potentially stale rollouts. It uses the rollout policy
+    directly as the importance-sampling denominator and discards tokens outside
+    its strict asymmetric trust region rather than clipping them.
+    """
+    if not 0 <= eps_clip_low < 1 or eps_clip_high < 0:
+        raise ValueError(
+            "SAO eps_clip_low must be in [0, 1) and eps_clip_high must be non-negative."
+        )
+    if logprobs.shape != rollout_logprobs.shape:
+        raise ValueError(
+            "logprobs and rollout_logprobs must have identical shapes, got "
+            f"{logprobs.shape} and {rollout_logprobs.shape}."
+        )
+
+    advantages = advantages.detach()
+    loss_mask = loss_mask.bool()
+    # Compare in log space before exponentiating. This prevents an arbitrarily
+    # stale rollout from overflowing exp() before SAO can discard the token.
+    log_ratio = logprobs.float() - rollout_logprobs.detach().float()
+    log_lower = torch.log1p(torch.tensor(-eps_clip_low, device=logprobs.device))
+    log_upper = torch.log1p(torch.tensor(eps_clip_high, device=logprobs.device))
+    is_within_trust_region = (
+        torch.isfinite(log_ratio) & (log_ratio > log_lower) & (log_ratio < log_upper)
+    )
+    sao_mask = loss_mask & is_within_trust_region
+    ratio = torch.exp(torch.where(sao_mask, log_ratio, torch.zeros_like(log_ratio)))
+
+    per_token_loss = -ratio * advantages
+    denominator = loss_mask.count_nonzero().clamp(min=1)
+    loss = torch.where(sao_mask, per_token_loss, 0.0).sum() / denominator
+
+    return loss, {
+        "loss": per_token_loss.detach(),
+        "importance_weight": ratio.detach(),
+        "approx_kl": log_ratio.detach(),
+        # Shared PPO stats interpret this as discarded-by-filter tokens.
+        "clip_mask": loss_mask & ~is_within_trust_region,
+        "dual_clip_mask": torch.zeros_like(loss_mask),
+        "sao_mask": sao_mask,
+    }
+
+
+def freeze_attention_parameters(model: torch.nn.Module) -> int:
+    """Freeze attention parameters in a critic before its optimizer is built."""
+    frozen = 0
+    for name, parameter in model.named_parameters():
+        path_segments = name.lower().split(".")
+        if any(
+            segment in {"attention", "self_attention", "self_attn"}
+            for segment in path_segments
+        ):
+            parameter.requires_grad_(False)
+            frozen += parameter.numel()
+    if frozen == 0:
+        raise ValueError(
+            "SAO critic attention freezing did not match any parameters. "
+            "Disable sao_freeze_attention or use a supported model architecture."
+        )
+    return frozen
+
+
 
 def cispo_loss_fn(
     logprobs: torch.Tensor,

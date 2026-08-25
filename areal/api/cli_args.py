@@ -1565,6 +1565,24 @@ class PPOActorConfig(TrainEngineConfig):
         metadata={"help": "SAPO temperature for negative advantages"},
     )
 
+    # SAO (Single-rollout Asynchronous Optimization)
+    use_sao_loss: bool = field(
+        default=False,
+        metadata={
+            "help": "Use SAO direct importance sampling with strict token filtering. "
+            "Requires use_decoupled_loss=True and a critic in PPOConfig."
+        },
+    )
+    sao_eps_clip_low: float = field(
+        default=0.2,
+        metadata={"help": "SAO lower direct-IS filtering delta from ratio 1."},
+    )
+    sao_eps_clip_high: float = field(
+        default=0.2,
+        metadata={"help": "SAO upper direct-IS filtering delta from ratio 1."},
+    )
+
+
     # CISPO (Clipped IS-weight Policy Optimization) - MiniMax-M1 https://arxiv.org/abs/2506.13585
     use_cispo_loss: bool = field(
         default=False,
@@ -1639,6 +1657,9 @@ class PPOActorConfig(TrainEngineConfig):
         Returns:
             True if compute_logp() should be called, False to skip.
         """
+        if self.use_sao_loss:
+            # SAO directly compares the train policy to rollout log-probabilities.
+            return False
         from areal.utils.constants import ProxLogpMethod
 
         method = ProxLogpMethod(self.prox_logp_method)
@@ -1658,7 +1679,11 @@ class PPOActorConfig(TrainEngineConfig):
         # The old default (behave_imp_weight_cap=5.0, mode=token_mask) enabled
         # filtering implicitly; the new default (rejection_sampling=None) disables
         # it. This warning helps users who relied on the old defaults.
-        if self.use_decoupled_loss and self.rejection_sampling is None:
+        if (
+            self.use_decoupled_loss
+            and self.rejection_sampling is None
+            and not self.use_sao_loss
+        ):
             logger.warning(
                 "use_decoupled_loss=True with rejection_sampling=None: "
                 "staleness filtering is disabled. If you previously relied on "
@@ -1682,6 +1707,24 @@ class PPOActorConfig(TrainEngineConfig):
                 raise ValueError(
                     "SAPO is not compatible with `use_decoupled_loss=True`. "
                     "Please set `actor.use_decoupled_loss=false` in your configuration."
+                )
+        
+        if self.use_sao_loss:
+            if self.use_sapo_loss or self.use_cispo_loss:
+                raise ValueError(
+                    "SAO, SAPO, and CISPO are mutually exclusive policy surrogates."
+                )
+            if not self.use_decoupled_loss:
+                raise ValueError(
+                    "SAO requires use_decoupled_loss=True so rollout log-probabilities "
+                    "are used as its direct importance-sampling denominator."
+                )
+            if self.importance_sampling_level != "token":
+                raise ValueError("SAO supports only token-level importance sampling.")
+            if not 0 <= self.sao_eps_clip_low < 1 or self.sao_eps_clip_high < 0:
+                raise ValueError(
+                    "SAO sao_eps_clip_low must be in [0, 1) and "
+                    "sao_eps_clip_high must be non-negative."
                 )
 
         # Validate CISPO configuration
@@ -1722,6 +1765,22 @@ class PPOCriticConfig(TrainEngineConfig):
             "help": "Mask truncated generations (no EOS token) and exclude from training"
         },
     )
+
+    sao_n_updates_per_actor_update: int = field(
+        default=1,
+        metadata={"help": "Critic updates per actor update when using SAO."},
+    )
+    sao_freeze_attention: bool = field(
+        default=False,
+        metadata={
+            "help": "Freeze critic attention parameters before optimizer creation."
+        },
+    )
+
+    def __post_init__(self):
+        if self.sao_n_updates_per_actor_update < 1:
+            raise ValueError("sao_n_updates_per_actor_update must be at least 1.")
+        super().__post_init__()
 
 
 def get_py_cmd(module: str, args: dict[str, Any]):
@@ -3090,6 +3149,13 @@ class PPOConfig(BaseExperimentConfig):
         """Validate the eval generation config."""
         if self.eval_gconfig is None:
             self.eval_gconfig = self.gconfig.new()
+        if self.actor.use_sao_loss:
+            if self.critic is None:
+                raise ValueError("SAO requires a critic configuration.")
+            if self.gconfig.n_samples != 1:
+                raise ValueError(
+                    "SAO is single-rollout optimization and requires gconfig.n_samples=1."
+                )
         # Propagate the LoRA adapter name to the rollout engine so the OpenAI-proxy
         # generation path requests the same adapter the trainer loads. The request
         # side (ArealOpenAI) cannot read gconfig.lora_name, so it must come from

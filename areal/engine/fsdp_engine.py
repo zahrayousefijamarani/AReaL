@@ -467,6 +467,13 @@ class FSDPEngine(TrainEngine):
             f"Applying FSDP2 with N-D parallelism for {time.perf_counter() - tik:.2f} seconds"
         )
 
+        if getattr(self.config, "sao_freeze_attention", False):
+            from areal.utils.functional import freeze_attention_parameters
+
+            frozen = freeze_attention_parameters(self.model)
+            self.logger.info(f"SAO froze {frozen:,} critic attention parameters")
+
+
         self._create_optimizer(ft_spec)
 
         if self.config.fsdp.per_layer_optim_step:

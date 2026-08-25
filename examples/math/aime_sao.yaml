@@ -1,9 +1,9 @@
-experiment_name: gsm8k-ppo
+experiment_name: aime25-sao
 trial_name: trial0
 
 seed: 1
 enable_offload: false
-total_train_epochs: 10
+total_train_epochs: 300
 tokenizer_path: ${actor.path}
 
 cluster:
@@ -80,6 +80,10 @@ actor:
     mean_level: batch
     std_level: batch
   max_new_tokens: ${gconfig.max_new_tokens}
+  # SAO: single-rollout asynchronous optimization with direct IS filtering.
+  use_sao_loss: true
+  sao_eps_clip_low: 0.2
+  sao_eps_clip_high: 0.2
   scheduling_spec:
     - task_type: worker
       port_count: 2
@@ -99,6 +103,10 @@ critic:
   dtype: ${actor.dtype}
   eps_clip: 0.5
   ppo_n_minibatches: ${actor.ppo_n_minibatches}
+  # SAO trains the value model twice per actor update. Qwen attention is
+  # frozen to stabilize critic optimization while its MLP/MoE components adapt.
+  sao_n_updates_per_actor_update: 2
+  sao_freeze_attention: false
   mb_spec:
     max_tokens_per_mb: 10240
   optimizer: ${actor.optimizer}
@@ -145,19 +153,19 @@ vllm:
 
 # datasets
 train_dataset:
-  batch_size: 256
+  batch_size: 30
   shuffle: true
   pin_memory: true
   num_workers: 4
-  path: /home/zahra/datasets/gsm8k
+  path: /home/zahra/datasets/aime
   type: rl
   max_length: 1024
 
 valid_dataset:
-  batch_size: 256
+  batch_size: 15
   pin_memory: true
   num_workers: 4
-  path: /home/zahra/datasets/gsm8k
+  path: /home/zahra/datasets/aime
   type: rl
 
 # Utilities
@@ -194,7 +202,7 @@ stats_logger:
     mode: disabled
   swanlab:
     project: ppo
-    name: gsm8k
+    name: aime25_sao_no_freeze
     mode: cloud
     api_key: CHqueBePouUJGo8kgtGXR
 

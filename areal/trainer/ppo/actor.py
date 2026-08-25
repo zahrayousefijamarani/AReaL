@@ -34,6 +34,7 @@ from areal.utils.functional import (
     cispo_loss_fn,
     ppo_actor_loss_fn,
     reward_overlong_penalty,
+    sao_loss_fn,
     sapo_loss_fn,
 )
 from areal.utils.perf_tracer import trace_perf
@@ -359,6 +360,9 @@ class PPOActor:
                         use_sapo_loss=self.config.use_sapo_loss,
                         sapo_tau_pos=self.config.sapo_tau_pos,
                         sapo_tau_neg=self.config.sapo_tau_neg,
+                        use_sao_loss=self.config.use_sao_loss,
+                        sao_eps_clip_low=self.config.sao_eps_clip_low,
+                        sao_eps_clip_high=self.config.sao_eps_clip_high,
                         use_cispo_loss=self.config.use_cispo_loss,
                         use_decoupled_loss=self.config.use_decoupled_loss,
                     ),
@@ -422,6 +426,9 @@ def grpo_loss_fn(
     use_sapo_loss: bool = False,
     sapo_tau_pos: float = 1.0,
     sapo_tau_neg: float = 1.05,
+    use_sao_loss: bool = False,
+    sao_eps_clip_low: float = 0.2,
+    sao_eps_clip_high: float = 0.2,
     use_cispo_loss: bool = False,
     use_decoupled_loss: bool = False,
     vocab_min_logits: torch.Tensor | None = None,
@@ -436,22 +443,53 @@ def grpo_loss_fn(
 
     entropy = entropy.detach()
 
-    # Resolve proximal log-probabilities based on method
-    prox_logp = _resolve_proximal_logp(
-        prox_logp_gt=prox_logp_gt,
-        prox_logp_method=prox_logp_method,
-        old_logp=old_logp,
-        logprobs=logprobs.detach(),
-        versions=input_data.get("versions"),
-        current_version=current_version,
-    )
+    # # Resolve proximal log-probabilities based on method
+    # prox_logp = _resolve_proximal_logp(
+    #     prox_logp_gt=prox_logp_gt,
+    #     prox_logp_method=prox_logp_method,
+    #     old_logp=old_logp,
+    #     logprobs=logprobs.detach(),
+    #     versions=input_data.get("versions"),
+    #     current_version=current_version,
+    # )
+
+    # SAO compares directly against rollout log-probabilities and never needs a
+    # reconstructed proximal policy. Avoid the otherwise mandatory extra
+    # forward/approximation path when asynchronous training is enabled.
+    if use_sao_loss:
+        prox_logp = old_logp
+    else:
+        prox_logp = _resolve_proximal_logp(
+            prox_logp_gt=prox_logp_gt,
+            prox_logp_method=prox_logp_method,
+            old_logp=old_logp,
+            logprobs=logprobs.detach(),
+            versions=input_data.get("versions"),
+            current_version=current_version,
+        )
+
 
     # Apply M2PO masking if threshold is set
     if m2_threshold is not None:
         loss_mask = _apply_m2po_masking(old_logp, prox_logp, loss_mask, m2_threshold)
 
-    # Use CISPO, SAPO, or PPO loss
-    if use_cispo_loss:
+    # # Use CISPO, SAPO, or PPO loss
+    # if use_cispo_loss:
+    # Use SAO, CISPO, SAPO, or PPO loss.
+    if use_sao_loss:
+        if use_sapo_loss or use_cispo_loss:
+            raise ValueError("SAO, SAPO, and CISPO are mutually exclusive surrogates.")
+        if not use_decoupled_loss:
+            raise ValueError("SAO requires use_decoupled_loss=True.")
+        loss, stat = sao_loss_fn(
+            logprobs=logprobs,
+            rollout_logprobs=old_logp,
+            advantages=advantages,
+            eps_clip_low=sao_eps_clip_low,
+            eps_clip_high=sao_eps_clip_high,
+            loss_mask=loss_mask,
+        )
+    elif use_cispo_loss:
         if use_sapo_loss:
             raise ValueError(
                 "CISPO and SAPO are mutually exclusive surrogates. "
@@ -584,6 +622,11 @@ def grpo_loss_fn(
             sapo_soft_gate=stat["sapo_soft_gate"],
             sapo_scaled_gate_pos=stat["sapo_scaled_gate_pos"],
             sapo_scaled_gate_neg=stat["sapo_scaled_gate_neg"],
+            denominator="n_valid_tokens",
+        )
+    if use_sao_loss:
+        stats_tracker.stat(
+            sao_valid_ratio=stat["sao_mask"].float(),
             denominator="n_valid_tokens",
         )
     else:

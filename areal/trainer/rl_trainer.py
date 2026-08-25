@@ -803,8 +803,16 @@ class PPOTrainer:
                         args={"global_step": global_step},
                     ),
                 ):
-                    self.critic.ppo_update(adv_batch)
-                    self.critic.step_lr_scheduler()
+                    critic_updates = (
+                        self.config.critic.sao_n_updates_per_actor_update
+                        if self.config.actor.use_sao_loss
+                        else 1
+                    )
+                    for _ in range(critic_updates):
+                        self.critic.ppo_update(adv_batch)
+                        self.critic.step_lr_scheduler()
+                    # self.critic.ppo_update(adv_batch)
+                    # self.critic.step_lr_scheduler()
                     self.critic.get_device_stats().log("ppo critic update")
                 if self._should_offload_critic:
                     self._offload_model(self.critic, role="critic")
