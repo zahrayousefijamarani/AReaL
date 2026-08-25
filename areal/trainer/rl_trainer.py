@@ -79,6 +79,91 @@ if TYPE_CHECKING:
 logger = logging.getLogger("RLTrainer")
 
 
+def _normalize_teacher_weights(
+    weights: list[float], device: torch.device
+) -> torch.Tensor:
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        raise ValueError("Sum of teacher weights must be positive.")
+    return torch.tensor(
+        [weight / total_weight for weight in weights],
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def _linear_curriculum_temperatures(
+    global_step: int,
+    warmup_steps: int,
+    tau_c_max: float,
+    tau_c_min: float,
+    tau_s_min: float,
+    tau_s_max: float,
+) -> tuple[float, float]:
+    if warmup_steps <= 0:
+        ratio = 1.0
+    else:
+        ratio = min(1.0, global_step / warmup_steps)
+    tau_c = tau_c_max * (1.0 - ratio) + tau_c_min * ratio
+    tau_s = tau_s_min * (1.0 - ratio) + tau_s_max * ratio
+    return tau_c, tau_s
+
+
+def _mix_teacher_logps(
+    per_teacher_logps: list[torch.Tensor],
+    teacher_weights: list[float],
+    weighting: str = "fixed",
+    student_logp: torch.Tensor | None = None,
+    global_step: int = 0,
+    competence_warmup_steps: int = 0,
+    competence_tau_c_max: float = 1.0,
+    competence_tau_c_min: float = 0.0,
+    competence_tau_s_min: float = 0.0,
+    competence_tau_s_max: float = 1.0,
+) -> torch.Tensor:
+    """Combine teacher token log probabilities for one trajectory.
+
+    Teacher engines expose sequence-level chosen-token log probabilities rather
+    than full vocabulary distributions, so competence alignment uses the
+    per-token negative absolute student/teacher log-probability gap as a stable
+    scalar proxy for ``-KL(p_s || p_t)``.
+    """
+    stacked = torch.stack(per_teacher_logps, dim=0)
+    priors = _normalize_teacher_weights(teacher_weights, stacked.device)
+    log_priors = torch.log(priors).view(-1, *([1] * (stacked.ndim - 1)))
+
+    if weighting == "fixed" or stacked.shape[0] == 1:
+        return torch.logsumexp(stacked + log_priors, dim=0)
+
+    normalized = stacked - stacked.mean(dim=tuple(range(1, stacked.ndim)), keepdim=True)
+    consensus = torch.logsumexp(normalized + log_priors, dim=0)
+    agreement = normalized - consensus.unsqueeze(0)
+
+    if weighting == "adaptive":
+        if student_logp is None:
+            raise ValueError("student_logp is required for adaptive teacher weighting.")
+        tau_c, tau_s = _linear_curriculum_temperatures(
+            global_step,
+            competence_warmup_steps,
+            competence_tau_c_max,
+            competence_tau_c_min,
+            competence_tau_s_min,
+            competence_tau_s_max,
+        )
+        student_logp = student_logp.to_local()
+        alignment = -(student_logp.detach().unsqueeze(0) - stacked).abs()
+        logits = tau_c * alignment + tau_s * agreement + log_priors
+    else:
+        raise ValueError(f"Unsupported teacher weighting mode: {weighting}")
+
+    adaptive_weights = torch.softmax(logits, dim=0)
+    return torch.logsumexp(
+        stacked + torch.log(adaptive_weights.clamp_min(1e-8)),
+        dim=0,
+    )
+
+
+
 class _EmptyDataLoader:
     """Minimal dataloader for online mode that yields empty dicts.
 
@@ -707,23 +792,32 @@ class PPOTrainer:
                         ]
                         per_teacher_logps = [future.result() for future in futures]
                     per_teacher_logps = RTensor.localize(per_teacher_logps)
-                    log_weights = torch.log(
-                        torch.tensor(
-                            self.teacher_mixture_weights,
-                            dtype=torch.float32,
-                            device=per_teacher_logps[0][0].device,
-                        )
-                    )
+                    assert self.config.teacher is not None
                     for traj_idx, traj in enumerate(rollout_batch):
-                        stacked = torch.stack(
+                        mixed_logp = _mix_teacher_logps(
                             [
                                 teacher_logps[traj_idx]
                                 for teacher_logps in per_teacher_logps
                             ],
-                            dim=0,
-                        )
-                        mixed_logp = torch.logsumexp(
-                            stacked + log_weights[:, None, None], dim=0
+                            self.teacher_mixture_weights,
+                            weighting=self.config.teacher.teacher_weighting,
+                            student_logp=traj.get("logprobs"),
+                            global_step=global_step,
+                            competence_warmup_steps=(
+                                self.config.teacher.competence_warmup_steps
+                            ),
+                            competence_tau_c_max=(
+                                self.config.teacher.competence_tau_c_max
+                            ),
+                            competence_tau_c_min=(
+                                self.config.teacher.competence_tau_c_min
+                            ),
+                            competence_tau_s_min=(
+                                self.config.teacher.competence_tau_s_min
+                            ),
+                            competence_tau_s_max=(
+                                self.config.teacher.competence_tau_s_max
+                            ),
                         )
                         traj["teacher_logp"] = mixed_logp
                         traj["rl_loss_weight"] = self.config.teacher.rl_loss_weight

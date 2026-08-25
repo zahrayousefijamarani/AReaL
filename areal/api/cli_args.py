@@ -3022,6 +3022,25 @@ class TeacherConfig:
 @dataclass
 class DistillationConfig:
     teachers: list[TeacherConfig] = field(default_factory=list)
+    teacher_weighting: str = field(
+        default="fixed",
+        metadata={
+            "help": "How to combine multiple teacher token log probabilities. "
+            "'fixed' uses configured teacher weights; 'adaptive' uses the "
+            "merged competence-aware adaptive consensus formula.",
+            "choices": ["fixed", "adaptive"],
+        },
+    )
+    competence_warmup_steps: int = field(
+        default=0,
+        metadata={
+            "help": "Linear curriculum duration for teacher_weighting='adaptive'."
+        },
+    )
+    competence_tau_c_max: float = field(default=1.0)
+    competence_tau_c_min: float = field(default=0.0)
+    competence_tau_s_min: float = field(default=0.0)
+    competence_tau_s_max: float = field(default=1.0)
     rl_loss_weight: float = field(
         default=1.0,
         metadata={"help": "RL loss weight."},
@@ -3047,6 +3066,24 @@ class DistillationConfig:
         total_w = sum(t.weight for t in self.teachers)
         if total_w <= 0:
             raise ValueError("Sum of teacher weights must be positive.")
+        
+        if self.teacher_weighting not in {"fixed", "adaptive"}:
+            raise ValueError(
+                f"teacher_weighting must be 'fixed' or 'adaptive', "
+                f"got {self.teacher_weighting!r}"
+            )
+        
+        if self.competence_warmup_steps < 0:
+            raise ValueError("competence_warmup_steps must be non-negative.")
+        
+        for name in (
+            "competence_tau_c_max",
+            "competence_tau_c_min",
+            "competence_tau_s_min",
+            "competence_tau_s_max",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be non-negative.")
 
 
 @dataclass

@@ -42,7 +42,7 @@ actor:
   backend: "fsdp:d1p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-0.6B
+  path: /home/zahra/models/Qwen3-0.6B
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -51,7 +51,7 @@ actor:
     max_tokens_per_mb: 10240
   optimizer:
     type: adam
-    lr: 1.70e-5
+    lr: 1e-6
     weight_decay: 0.017
     beta1: 0.9
     beta2: 0.999
@@ -90,7 +90,19 @@ actor:
 teacher:
   teachers:
     - engine_type: rollout
-      path: Qwen/Qwen2.5-14B-Instruct
+      path: /home/zahra/models/Qwen3-8B
+      weight: 1.0
+      rollout:
+        backend: "vllm:d1p1t1"
+        scheduling_spec:
+          - task_type: worker
+            port_count: 2
+            gpu: 1
+            mem: 32
+            cmd: python3 -m areal.infra.rpc.rpc_server
+            env_vars: {}
+    - engine_type: rollout
+      path: /home/zahra/models/Qwen2.5-14B-Instruct
       weight: 1.0
       rollout:
         backend: "vllm:d1p1t2"
@@ -101,8 +113,18 @@ teacher:
             mem: 32
             cmd: python3 -m areal.infra.rpc.rpc_server
             env_vars: {}
+  teacher_weighting: adaptive
+
+  competence_warmup_steps: 30
+
+  competence_tau_c_max: 0.1
+  competence_tau_c_min: 0.05
+
+  competence_tau_s_min: 0.0
+  competence_tau_s_max: 1
+
   rl_loss_weight: 1.0
-  distill_loss_weight: 5e-3
+  distill_loss_weight: 5e-2
 
 ref:
   backend: ${actor.backend}
@@ -137,6 +159,7 @@ vllm:
   dtype: ${actor.dtype}
   max_model_len: 32768
   gpu_memory_utilization: 0.8
+  enforce_eager: True
 
 # datasets
 train_dataset:
@@ -144,7 +167,7 @@ train_dataset:
   shuffle: true
   pin_memory: true
   num_workers: 4
-  path: openai/gsm8k
+  path: /home/zahra/datasets/gsm8k
   type: rl
   max_length: 1024
 
@@ -152,7 +175,7 @@ valid_dataset:
   batch_size: 256
   pin_memory: true
   num_workers: 4
-  path: openai/gsm8k
+  path: /home/zahra/datasets/gsm8k
   type: rl
 
 # Utilities
@@ -160,7 +183,7 @@ saver:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 1
+  freq_epochs: null
   freq_steps: null
   freq_secs: null
 
@@ -169,7 +192,7 @@ recover:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 1
+  freq_epochs: null
   freq_steps: null
   freq_secs: 3600
 
@@ -187,6 +210,11 @@ stats_logger:
   fileroot: ${cluster.fileroot}
   wandb:
     mode: disabled
+  swanlab:
+    project: ada_mopd
+    name: gsm8k_multi_teacher_5e-2
+    mode: cloud
+    api_key: CHqueBePouUJGo8kgtGXR
 
 perf_tracer:
   experiment_name: ${experiment_name}
