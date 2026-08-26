@@ -413,7 +413,8 @@ class FSDPEngine(TrainEngine):
         is_llm_cpu_load = (
             self.config.fsdp.memory_efficient_load
             and not self.config.init_from_scratch
-            and not self.is_vision_model
+            # and not self.is_vision_model
+            and (not self.is_vision_model or self.config.is_critic)
         )
 
         if is_llm_cpu_load or self.config.use_lora:
@@ -980,6 +981,15 @@ class FSDPEngine(TrainEngine):
         return FSDPParallelStrategy(
             **dataclasses.asdict(parallel_strategy),
         )
+    
+    def _get_critic_model_class(self):
+        if is_qwen3_5_model(self.model_config.model_type):
+            from areal.models.transformers.qwen3_5 import (
+                get_qwen3_5_token_classification_model,
+            )
+
+            return get_qwen3_5_token_classification_model(self.model_config.model_type)
+        return AutoModelForTokenClassification
 
     def _create_llm_actor_or_critic(self):
         # Storage dtype = optimizer_dtype. FSDP2 MixedPrecisionPolicy
@@ -988,7 +998,8 @@ class FSDPEngine(TrainEngine):
         dtype = getattr(torch, self.config.optimizer_dtype)
 
         if self.config.is_critic:
-            model_class = AutoModelForTokenClassification
+            model_class = self._get_critic_model_class()
+            # model_class = AutoModelForTokenClassification
             model_kwargs = {"num_labels": 1}
         else:
             model_class = AutoModelForCausalLM
@@ -1031,6 +1042,10 @@ class FSDPEngine(TrainEngine):
             # Weights are broadcast from rank 0 after FSDP sharding in initialize().
             # Note: meta device optimization only applies to LLM (not VLM), because
             # VLM uses from_pretrained() which doesn't support meta device context.
+            if (
+                not self.is_vision_model or self.config.is_critic
+            ) and dist.get_rank() != 0:
+                loading_device = "meta"
             if not self.is_vision_model and dist.get_rank() != 0:
                 loading_device = "meta"
             else:
@@ -1042,7 +1057,7 @@ class FSDPEngine(TrainEngine):
 
         # Note: VLMs often have vision_tower in fp32 already; loading whole
         # model in optimizer_dtype (fp32 default) is consistent.
-        if self.is_vision_model:
+        if self.is_vision_model  and not self.config.is_critic:
             # Compute dtype (config.dtype) is what FSDP2 MP casts to in
             # forward/backward; storage dtype (optimizer_dtype) is restricted
             # to fp32/bf16 by config validation, so checking it would never
